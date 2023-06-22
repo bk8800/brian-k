@@ -1,0 +1,256 @@
+---
+title: "Predicting Movement Quality and Assessing the Factors in a Barbell Lift"
+author: "Brian R. Kern"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+
+### Introduction
+Heart disease is largely preventable through diet and exercise yet remains the leading cause of mortality in the United States.^1,2,3^
+The development of wearables such as "Fitbits" have made it easy for people to track the quantity of their movement.
+Although wearables may serve as tools to motivate individuals to become more active by capturing data on how *much* they move, it doesn't yet reveal how *well* they move (quality).
+Movement quality is a prerequisite to an increased quantity because it's strongly positively correlated with musculoskeletal (MSK) injury.
+It's likely that the prevalence of MSK injuries can be reduced by capturing data on movement, alerting the user, and providing corrections.
+Despite this being a complex objective, the first step that must be done is to capture and assess high quality data from movement patterns.
+Companies such as [Fusionetics](https://www.fusionetics.com) have made significant advancements in data driven movement assessment and correction.  
+The goal in this project is to predict whether a barbell lift was performed correctly or not, and what factor/s mainly determined it.
+Six participants were asked to perform a barbell lift correctly and incorrectly in five different ways.
+Data was captured from accelerometers on the belt, forearm, arm, and dumbbell during the lifts.
+
+***
+
+### Data
+A training dataset and a testing dataset were made available by (http://groupware.les.inf.puc-rio.br/har)  
+The variable "classe" is the outcome/dependent variable.  
+[training data](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv)  
+[testing data](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv)
+
+***
+
+### Load packages, Review and Clean Data
+The packages "tidyverse", "tidyr", and "dplyr" were loaded for data manipulation whereas the packages "caret" and "randomForest" were loaded for creating and evaluating the model.
+The structure of the dataset was viewed to take note of which variables were of no value so that they could be removed. 
+The row names/numbers column had no value in predicting the outcome and thus was not included in the model so it was removed.
+```{r warning=FALSE, message=FALSE}
+library(tidyverse)
+library(tidyr)
+library(dplyr)
+library(caret)
+library(randomForest)
+
+
+
+#load data
+training_raw <- read.csv("C:/Users/bkern/Downloads/pml-training.csv",
+                     na.strings = c("","NA"),
+                     check.names = FALSE)
+testing_raw <- read.csv("C:/Users/bkern/Downloads/pml-testing.csv",
+                     na.strings = c("","NA"),
+                     check.names = FALSE)
+
+
+#view structure of dataset to determine which variables are of no value and should be removed
+str(training_raw)
+
+
+#remove row names/numbers column
+training_raw <- training_raw[,!names(training_raw) %in% c("")]
+testing_raw <- testing_raw[,!names(testing_raw) %in% c("")]
+```
+Although the description of the assignment said that there were six participants and five different classifications for the exercise, it was important to verify these assumptions about the datasets. Fortunately it was discovered that both the training and testing datasets had 6 participants which not only matched the statement in the prompt, but supported the idea that the testing dataset was representative of the training dataset. Since most algorithms can't handle null values, the prevalence was assessed and it was determined that approximately 98% of values in several variables contained nulls so those variables were removed. Variables containing values with very little difference aren't helpful in predicting outcomes and ones that are strongly correlated can be thought of as the same and thus redundant. To reduce computation times of algorithms, variables with near zero variance and ones that were colinear were removed.
+```{r eval=TRUE}
+
+#verify assumptions made in datasets
+training_raw %>%
+  summarize(training_user_dct = n_distinct(user_name))
+training_raw %>%
+  summarize(training_classe_dct = n_distinct(classe))
+testing_raw %>%
+  summarize(testing_user_dct = n_distinct(user_name))
+
+
+#review amount of NAs in dataset
+for(x in 1:as.numeric(ncol(training_raw))){
+  print(sum(is.na(training_raw[,x]))
+        /
+          as.numeric(nrow(training_raw))
+        )
+}
+#98% of the data is null for fields 11:35, 49:58, 68:82, 86:100, 102:111, 124:138, 140:149 which is way too much to be imputed.
+training <- training_raw[,-c(1:6, 11:35, 49:58, 68:82, 86:100, 102:111, 124:138, 140:149)]
+testing <-   testing_raw[,-c(1:6, 11:35, 49:58, 68:82, 86:100, 102:111, 124:138, 140:149)]
+
+
+#to reduce computation times of algorithms, determine which variables have near zero variance and which are colinear
+nearZeroVar(training[,-which(colnames(training)=="classe")], saveMetrics = TRUE)
+#all variables have enough variance to be meaningful
+colinear_vars <- abs(cor(training[,-which(colnames(training)=="classe")]))
+diag(colinear_vars) <- 0
+which(colinear_vars>.9,arr.ind = TRUE)
+#total_accel_belt, accel_belt_y, accel_belt_z are highly correlated with roll belt so filter them out
+colinear_vars <- abs(cor(training[,!names(training) %in% c("classe","total_accel_belt", "accel_belt_y", "accel_belt_z")]))
+diag(colinear_vars) <- 0
+which(colinear_vars>.9,arr.ind = TRUE)
+#gyros_dumbbell_z, gyros_forearm_z, are highly correlated with gyros_dumbbell_x so filter them out
+colinear_vars <- abs(cor(training[,!names(training) %in% c("classe","total_accel_belt", "accel_belt_y", "accel_belt_z", "gyros_dumbbell_z", "gyros_forearm_z")]))
+diag(colinear_vars) <- 0
+which(colinear_vars>.9,arr.ind = TRUE)
+#pitch_belt and gyros_arm_x are highly correlated with accel_belt_x and gyros_arm_y respectively so filter them out
+colinear_vars <- abs(cor(training[,!names(training) %in% c("classe","total_accel_belt","accel_belt_y","accel_belt_z","gyros_dumbbell_z","gyros_forearm_z","pitch_belt","gyros_arm_x")]))
+diag(colinear_vars) <- 0
+which(colinear_vars>.85,arr.ind = TRUE)
+#magnet_belt_x is highly correlated with accel_belt_x so filter it out
+colinear_vars <- abs(cor(training[,!names(training) %in% c("classe","total_accel_belt","accel_belt_y","accel_belt_z","gyros_dumbbell_z","gyros_forearm_z","pitch_belt","gyros_arm_x","magnet_belt_x")]))
+diag(colinear_vars) <- 0
+which(colinear_vars>.80,arr.ind = TRUE)
+#"yaw_belt","magnet_arm_x","magnet_arm_z","accel_dumbbell_x","accel_dumbbell_z" are highly correlated with "roll_belt","accel_arm_x","magnet_arm_y","pitch_dumbbell","yaw_dumbbell" respectively so filter it out
+colinear_vars <- abs(cor(training[,!names(training) %in% c("classe","total_accel_belt","accel_belt_y","accel_belt_z","gyros_dumbbell_z","gyros_forearm_z","pitch_belt","gyros_arm_x","magnet_belt_x","yaw_belt","magnet_arm_x","magnet_arm_z","accel_dumbbell_x","accel_dumbbell_z")]))
+diag(colinear_vars) <- 0
+which(colinear_vars>.80,arr.ind = TRUE)
+#no variables have a correlation >.8 with one another so filter out variables identified above from training set and and continue
+training <- training[,!names(training) %in% c("total_accel_belt","accel_belt_y","accel_belt_z","gyros_dumbbell_z","gyros_forearm_z","pitch_belt","gyros_arm_x","magnet_belt_x","yaw_belt","magnet_arm_x","magnet_arm_z","accel_dumbbell_x","accel_dumbbell_z")]
+```
+
+***
+
+### Partitioning Data
+To minimize both the variability and bias in the model, the training dataset was split into datasets for building the model and validating it at the end.
+The building dataset was then split into a training and first round testing dataset.
+A validation dataset was used because it gives a more accurate estimate of the out of sample error being that none of the data contained in it was used in training the model. Finally, the outcome/dependent variable was made to be a factor in all three datasets.
+```{r}
+#split training set into additional building, validation, and testing sets
+set.seed(2023)
+in_build <- createDataPartition(training$classe,
+                                times=1,
+                                p=.75,
+                                list = FALSE)
+building <- training[in_build,]
+validation <- training[-in_build,]
+set.seed(2023)
+in_train <- createDataPartition(building$classe,
+                                times=1,
+                                p=.75,
+                                list = FALSE)
+training <- building[in_train,]
+testing_first_round <- building[-in_train,]
+
+
+#make outcome variable a factor
+building$classe <- as.factor(building$classe)
+validation$classe <- as.factor(validation$classe)
+testing_first_round$classe <- as.factor(testing_first_round$classe)
+```
+### Training the Model
+In an effort to maximize prediction accuracy while maintaining reasonable computation times and interpretability, a Random Forest algorithm was used to train the model.
+It's crucial that a data scientist considers the balance of these three factors since they play a huge role in whether a model is actually used or not.
+Due to a negligible gain in accuracy but a significantly longer training time (5x), the algorithm was revised to compute with only 100 trees.
+One hundred trees was chosen because it was approximately the value where the error rate stopped decreasing at a meaningful level as seen in the plot.
+The model was used to predict the outcome in the first round testing dataset.
+Although the accuracy was extremely high at 98% on the first round testing dataset, it's possible that the model only performs well on this sample and not on others. For the reason, a stacking approach was implemented.
+```{r}
+#partition the data by random sampling
+set.seed(2023)
+training_01 <- training[sample(nrow(training),4000),]
+#train model
+model_fit_rf_01 <- train(training_01[,-which(colnames(training_01)=="classe")],training_01$classe,
+                         method = "rf")
+#see how long it took algorithm to fit model to ensure it isn't too computationally intensive
+run_time <- model_fit_rf_01$times
+run_time$everything
+#training the model took 389 seconds which is too long so determine the minimum amount of trees necessary for maximize accuracy
+plot(model_fit_rf_01$finalModel)
+#only use 100 trees because the computational time needed beyond that isn't worth the negligible gain in accuracy
+model_fit_rf_01 <- train(training_01[,-which(colnames(training_01)=="classe")],training_01$classe,
+                         method = "rf",
+                         ntree=100)
+#see how long it took algorithm to fit model to ensure it isn't too computationally intensive
+run_time <- model_fit_rf_01$times
+run_time$everything
+#model took about a 5th of the time to train
+plot(model_fit_rf_01$finalModel)
+#predict on testing_first_round dataset
+prediction_rf_01 <- predict(model_fit_rf_01,testing_first_round,
+                            list=FALSE)
+#check accuracy
+confusionMatrix(prediction_rf_01,testing_first_round$classe)
+```
+#### Stacking Phase
+Stacking and ensemble methods used in models tend to be more accurate so Random Forest algorithms were trained on 2 different samples from the training dataset. The predictions from all 3 were combined with the outcome/dependent variable from first round testing dataset to form a new dataset.
+Finally, another Random Forest algorithm was trained on this newly created dataset to yield a combined model. Predictions were made from the individual models and the combined model on the validation dataset.
+```{r}
+#partition another sample of data
+set.seed(1991)
+training_02 <- training[sample(nrow(training),4000),]
+#only use 100 trees because the computational time needed beyond that isn't worth the negligible gain in accuracy
+model_fit_rf_02 <- train(training_02[,-which(colnames(training_02)=="classe")],training_02$classe,
+                         method = "rf",
+                         ntree=100)
+#predict on testing_first_round dataset
+prediction_rf_02 <- predict(model_fit_rf_02,testing_first_round,
+                            list=FALSE)
+#partition another sample of data
+set.seed(1996)
+training_03 <- training[sample(nrow(training),4000),]
+#only use 100 trees because the computational time needed beyond that isn't worth the negligible gain in accuracy
+model_fit_rf_03 <- train(training_03[,-which(colnames(training_03)=="classe")],training_03$classe,
+                         method = "rf",
+                         ntree=100)
+#predict on testing_first_round dataset
+prediction_rf_03 <- predict(model_fit_rf_03,testing_first_round,
+                            list=FALSE)
+
+
+#create a dataset from predictions and train from it
+predictions_df <- data.frame(testing_first_round$classe,prediction_rf_01,prediction_rf_02,prediction_rf_03)
+model_fit_predictions_df_rfs <- train(predictions_df[,-which(colnames(predictions_df)=="testing_first_round.classe")],predictions_df$testing_first_round.classe,
+                                method = "rf",
+                                ntree=100)
+predictions_from_df_rfs <- predict(model_fit_predictions_df_rfs,predictions_df)
+#predict on validation dataset to determine out of sample error
+#with individual models and combined model to see if there's a notable difference in accuracy
+predictions_from_validation_rf_01 <- predict(model_fit_rf_01,validation)
+predictions_from_validation_rf_02 <- predict(model_fit_rf_02,validation)
+predictions_from_validation_rf_03 <- predict(model_fit_rf_03,validation)
+#predict on predictors
+predictions_from_validation_df <- data.frame(validation$classe,prediction_rf_01=predictions_from_validation_rf_01,prediction_rf_02=predictions_from_validation_rf_02,prediction_rf_03=predictions_from_validation_rf_03)
+predictions_from_validation_rfs <- predict(model_fit_predictions_df_rfs,predictions_from_validation_df)
+
+```
+### Evaluation of Models, Final Prediction, and Variable Importance.
+The performance of all models were extremely high at around 98% accuracy. For this reason, out of sample error was expected to be no greater than 3%.
+Since the combined model was only about 1% better than the individual models, the model on the first sample of data was used the predict the classes on the testing dataset and determine the most important variables.
+Roll_belt was by far the most important variable for predicting followed by pitch_forearm and magnet dumbbell_z.
+
+```{r}
+#evaluate performance
+confusionMatrix(predictions_from_validation_rf_01,validation$classe)
+#98.1% overall accuracy just using the 1st random forest model
+confusionMatrix(predictions_from_validation_rf_02,validation$classe)
+#97.7% overall accuracy just using the 2nd random forest model
+confusionMatrix(predictions_from_validation_rf_03,validation$classe)
+#98.1% overall accuracy just using the 3rd random forest model
+confusionMatrix(predictions_from_validation_rfs,validation$classe)
+#98.8% overall accuracy for all 3 random forest models
+avg_accuracy_rfs <- sum(98.1,97.7,98.1)/3
+percent_better_combined_rfs <- (98.9-avg_accuracy_rfs)/avg_accuracy_rfs
+percent_better_combined_rfs
+#accuracy is only 1% better and the model takes longer to compute and is harder to interpret
+#whereas all 3 random forest models performed with above a 95% accuracy
+#one random forest model is sufficient to use for determining variable importance and predicting on the testing dataset
+
+
+#predict categories in testing dataset
+predictions_from_testing_df <- predict(model_fit_rf_01,testing)
+predictions_from_testing_df
+#I'd imagine the out of sample error will less than 3% since that was what I found on the validation datasets
+
+
+#determine variable importance
+varImp(model_fit_rf_01)
+#roll_belt is by far the most important variable for predicting followed by pitch_forearm and magnet dumbbell_z
+```
+##### Citations
+^1^: https://www.cdc.gov/nchs/fastats/leading-causes-of-death.htm  
+^2^: https://newsroom.clevelandclinic.org/2021/09/29/90-percent-of-heart-disease-is-preventable-through-healthier-diet-regular-exercise-and-not-smoking/  
+^3^: https://www.heart.org/en/healthy-living/healthy-eating/eat-smart/nutrition-basics/aha-diet-and-lifestyle-recommendations
